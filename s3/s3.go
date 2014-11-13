@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/crowdmob/goamz/aws"
+    "github.com/magiczhao/goamz_cm/dnscache"
 )
 
 const debug = false
@@ -40,6 +41,7 @@ type S3 struct {
 	aws.Region
 	ConnectTimeout time.Duration
 	ReadTimeout    time.Duration
+	dns            dnscache.DNSCache
 	private        byte // Reserve the right of using private data.
 }
 
@@ -93,7 +95,12 @@ var attempts = aws.AttemptStrategy{
 
 // New creates a new S3.
 func New(auth aws.Auth, region aws.Region) *S3 {
-	return &S3{auth, region, 0, 0, 0}
+	endpoint_host := region.S3BucketEndpoint
+	if endpoint_host == "" {
+		endpoint_host = region.S3Endpoint
+	}
+	dns := NewDNSCache(endpoint_host)
+	return &S3{auth, region, 0, 0, dns, 0}
 }
 
 // Bucket returns a Bucket with the given name.
@@ -995,6 +1002,11 @@ func (s3 *S3) prepare(req *request) error {
 
 	signpathPatiallyEscaped := partiallyEscapedPath(signpath)
 	req.headers["Host"] = []string{u.Host}
+	if u.Scheme == "http" {
+		s3.dns.Refresh()
+		u.Host = s3.dns.GetIp()
+		s3.baseurl = u.String()
+	}
 	req.headers["Date"] = []string{time.Now().In(time.UTC).Format(time.RFC1123)}
 	if s3.Auth.Token() != "" {
 		req.headers["X-Amz-Security-Token"] = []string{s3.Auth.Token()}
@@ -1011,12 +1023,23 @@ func (s3 *S3) setupHttpRequest(req *request) (*http.Request, error) {
 	}
 	u.Opaque = fmt.Sprintf("//%s%s", u.Host, partiallyEscapedPath(u.Path))
 
+	host := ""
+	if hosts, ok := req.headers["Host"]; !ok || len(hosts) {
+		if base_url, err := url.Parse(s3.Region.S3Endpoint); err == nil {
+			host = base_url.Host
+		} else {
+			return nil, err
+		}
+	} else {
+		host = hosts[0]
+	}
 	hreq := http.Request{
 		URL:        u,
 		Method:     req.method,
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Close:      true,
+		Host:		host,
 		Header:     req.headers,
 	}
 

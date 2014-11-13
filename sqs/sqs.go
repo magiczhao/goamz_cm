@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/crowdmob/goamz/aws"
+	"github.com/magiczhao/goamz_cm/dnscache"
 	"io"
 	"io/ioutil"
 	"log"
@@ -31,6 +32,7 @@ const debug = false
 type SQS struct {
 	aws.Auth
 	aws.Region
+	dns *dnscache.DNSCache
 	private byte // Reserve the right of using private data.
 }
 
@@ -50,7 +52,12 @@ func NewFrom(accessKey, secretKey, region string) (*SQS, error) {
 
 // NewFrom Create A new SQS Client from an exisisting aws.Auth
 func New(auth aws.Auth, region aws.Region) *SQS {
-	return &SQS{auth, region, 0}
+	endpoint_host := region.S3BucketEndpoint
+	if endpoint_host == "" {
+		endpoint_host = region.S3Endpoint
+	}
+	dns := dnscache.NewDNSCache(endpoint_host)
+	return &SQS{auth, region, dns, 0}
 }
 
 // Queue Reference to a Queue
@@ -471,10 +478,19 @@ func (s *SQS) query(queueUrl string, params map[string]string, resp interface{})
 		return err
 	}
 
+	host := url_.Host
+	if url_.Scheme == "http" {
+		s.dns.Refresh()
+		url_.Host = s.dns.GetIp()
+	}
+
 	params["Version"] = "2012-11-05"
 	hreq, err := http.NewRequest("POST", url_.String(), strings.NewReader(multimap(params).Encode()))
 	if err != nil {
 		return err
+	}
+	if url_.Scheme == "http" {
+		hreq.Header.Set("Host", host)
 	}
 
 	hreq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
