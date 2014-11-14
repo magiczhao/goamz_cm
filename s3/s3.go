@@ -41,7 +41,7 @@ type S3 struct {
 	aws.Region
 	ConnectTimeout time.Duration
 	ReadTimeout    time.Duration
-	dns            dnscache.DNSCache
+	dns            *dnscache.DNSCache
 	private        byte // Reserve the right of using private data.
 }
 
@@ -99,7 +99,7 @@ func New(auth aws.Auth, region aws.Region) *S3 {
 	if endpoint_host == "" {
 		endpoint_host = region.S3Endpoint
 	}
-	dns := NewDNSCache(endpoint_host)
+	dns := dnscache.NewDNSCache(endpoint_host)
 	return &S3{auth, region, 0, 0, dns, 0}
 }
 
@@ -791,7 +791,6 @@ func (b *Bucket) UploadSignedURL(path, method, content_type string, expires time
 		method = "PUT"
 	}
 	stringToSign := method + "\n\n" + content_type + "\n" + strconv.FormatInt(expire_date, 10) + "\n/" + b.Name + "/" + path
-	fmt.Println("String to sign:\n", stringToSign)
 	a := b.S3.Auth
 	secretKey := a.SecretKey
 	accessId := a.AccessKey
@@ -1005,7 +1004,7 @@ func (s3 *S3) prepare(req *request) error {
 	if u.Scheme == "http" {
 		s3.dns.Refresh()
 		u.Host = s3.dns.GetIp()
-		s3.baseurl = u.String()
+		req.baseurl = u.String()
 	}
 	req.headers["Date"] = []string{time.Now().In(time.UTC).Format(time.RFC1123)}
 	if s3.Auth.Token() != "" {
@@ -1015,16 +1014,52 @@ func (s3 *S3) prepare(req *request) error {
 	return nil
 }
 
+// amazonShouldEscape returns true if byte should be escaped
+func amazonShouldEscape(c byte) bool {
+	return !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		(c >= '0' && c <= '9') || c == '_' || c == '-' || c == '~' || c == '.' || c == '/' || c == ':')
+}
+
+// amazonEscape does uri escaping exactly as Amazon does
+func amazonEscape(s string) string {
+	hexCount := 0
+
+	for i := 0; i < len(s); i++ {
+		if amazonShouldEscape(s[i]) {
+			hexCount++
+		}
+	}
+
+	if hexCount == 0 {
+		return s
+	}
+
+	t := make([]byte, len(s)+2*hexCount)
+	j := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; amazonShouldEscape(c) {
+			t[j] = '%'
+			t[j+1] = "0123456789ABCDEF"[c>>4]
+			t[j+2] = "0123456789ABCDEF"[c&15]
+			j += 3
+		} else {
+			t[j] = s[i]
+			j++
+		}
+	}
+	return string(t)
+}
 // Prepares an *http.Request for doHttpRequest
 func (s3 *S3) setupHttpRequest(req *request) (*http.Request, error) {
 	u, err := req.url()
 	if err != nil {
 		return nil, err
 	}
-	u.Opaque = fmt.Sprintf("//%s%s", u.Host, partiallyEscapedPath(u.Path))
+	// u.Opaque = fmt.Sprintf("//%s%s", u.Host, partiallyEscapedPath(u.Path))
+	u.Opaque = amazonEscape(req.path)
 
 	host := ""
-	if hosts, ok := req.headers["Host"]; !ok || len(hosts) {
+	if hosts, ok := req.headers["Host"]; !ok || len(hosts) == 0 {
 		if base_url, err := url.Parse(s3.Region.S3Endpoint); err == nil {
 			host = base_url.Host
 		} else {
@@ -1039,7 +1074,7 @@ func (s3 *S3) setupHttpRequest(req *request) (*http.Request, error) {
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Close:      true,
-		Host:		host,
+		Host:       host,
 		Header:     req.headers,
 	}
 

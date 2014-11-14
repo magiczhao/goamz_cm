@@ -477,20 +477,10 @@ func (s *SQS) query(queueUrl string, params map[string]string, resp interface{})
 	if err != nil {
 		return err
 	}
-
-	host := url_.Host
-	if url_.Scheme == "http" {
-		s.dns.Refresh()
-		url_.Host = s.dns.GetIp()
-	}
-
 	params["Version"] = "2012-11-05"
 	hreq, err := http.NewRequest("POST", url_.String(), strings.NewReader(multimap(params).Encode()))
 	if err != nil {
 		return err
-	}
-	if url_.Scheme == "http" {
-		hreq.Header.Set("Host", host)
 	}
 
 	hreq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -502,6 +492,10 @@ func (s *SQS) query(queueUrl string, params map[string]string, resp interface{})
 
 	signer := aws.NewV4Signer(s.Auth, "sqs", s.Region)
 	signer.Sign(hreq)
+	if url_.Scheme == "http" {
+		s.dns.Refresh()
+		url_.Host = s.dns.GetIp()
+	}
 
 	r, err := http.DefaultClient.Do(hreq)
 
